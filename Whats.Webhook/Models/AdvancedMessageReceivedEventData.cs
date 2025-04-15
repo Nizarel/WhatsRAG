@@ -7,6 +7,7 @@ namespace Whats.Webhook.Models
         public string Content { get; set; }
         public string ChannelType { get; set; }
         public string ReceivedTimeStamp { get; set; }
+        public Media? media { get; set; }
     }
 }
 // This class represents the data structure for an advanced message received event in a WhatsApp webhook.

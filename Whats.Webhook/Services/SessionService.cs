@@ -1,124 +1,82 @@
-using System.Net;
-using System.Text.Json;
-using Whats.Webhook.Repositories;
-using Whats.Webhook.Models;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Configuration;
+using System.Net.Http.Json;
 
 namespace Whats.Webhook.Services
 {
-    public class SessionService
+    public class SessionService : ISessionService
     {
-        private readonly ChatRepository _chatRepository;
+        private readonly HttpClient _httpClient;
+        private readonly ILogger<SessionService> _logger;
+        private readonly string _apiBaseUrl;
 
-        public SessionService(ChatRepository chatRepository)
+        public SessionService(
+            HttpClient httpClient,
+            IConfiguration configuration,
+            ILogger<SessionService> logger)
         {
-            _chatRepository = chatRepository ?? throw new ArgumentNullException(nameof(chatRepository));
+            _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+            _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+            _apiBaseUrl = configuration["BackendApi:BaseUrl"] ?? throw new ArgumentException("BackendApi:BaseUrl configuration is missing");
         }
 
-        public async Task<bool> CheckSessionExistsAsync(string sessionId, ILogger log)
+        public async Task<bool> CheckSessionExistsAsync(string sessionId)
         {
             try
             {
-                var response = await _chatRepository.GetSession(sessionId);
-                if (response.StatusCode == HttpStatusCode.OK)
-                {
-                    log.LogInformation("The session already exists.");
-                    return true;
-                }
-
-                if (response.StatusCode == HttpStatusCode.NotFound)
-                {
-                    log.LogInformation("The session does not exist.");
-                }
+                var response = await _httpClient.GetAsync($"{_apiBaseUrl}/api/sessions/{sessionId}/exists");
+                return response.IsSuccessStatusCode && await response.Content.ReadFromJsonAsync<bool>();
             }
             catch (Exception ex)
             {
-                log.LogError(ex, "An error occurred while checking the session.");
-                throw;
+                _logger.LogError(ex, "Error checking if session {SessionId} exists", sessionId);
+                // Default to false, which will trigger session creation
+                return false;
             }
-
-            return false;
         }
 
-        public async Task CreateSessionAsync(string sessionId, ILogger log)
+        public async Task CreateSessionAsync(string sessionId)
         {
             try
             {
-                var response = await _chatRepository.CreateSession(sessionId);
-                if (response.StatusCode == HttpStatusCode.Created)
-                {
-                    log.LogInformation("Session was successfully created.");
-                }
-                else
-                {
-                    var errorContent = await response.Content.ReadAsStringAsync();
-                    log.LogError("Failed to create session. StatusCode: {StatusCode}, Response: {Response}", response.StatusCode, errorContent);
-                }
+                var response = await _httpClient.PostAsync($"{_apiBaseUrl}/api/sessions/{sessionId}", null);
+                response.EnsureSuccessStatusCode();
+                _logger.LogInformation("Created new session: {SessionId}", sessionId);
             }
             catch (Exception ex)
             {
-                log.LogError(ex, "An error occurred while creating the session.");
+                _logger.LogError(ex, "Error creating session {SessionId}", sessionId);
                 throw;
             }
         }
 
-        public async Task<string?> ProcessChatAsync(string sessionId, string messageContent, ILogger log)
+        public async Task<string> ProcessChatAsync(string sessionId, string message)
         {
-            var chatPayload = new
-            {
-                sessionId = sessionId,
-                promptText = messageContent
-            };
-
             try
             {
-                var chatResponse = await _chatRepository.SendChatRequest(chatPayload);
-                var chatResult = await chatResponse.Content.ReadAsStringAsync();
-
-                log.LogInformation("Chat response: {ChatResult}", chatResult);
-
-                if (string.IsNullOrEmpty(chatResult))
+                _logger.LogInformation("Processing chat message for session {SessionId}", sessionId);
+                
+                var request = new
                 {
-                    log.LogError("Chat result is null or empty.");
-                    return null;
-                }
+                    Message = message
+                };
 
-                if (chatResult == "Invalid request")
-                {
-                    log.LogError("Chat response indicates an invalid request.");
-                    return null;
-                }
-
-                if (Utilities.IsValidJson(chatResult))
-                {
-                    try
-                    {
-                        var chatCompletionObject = JsonSerializer.Deserialize<ChatCompletion>(chatResult);
-                        if (chatCompletionObject != null && !string.IsNullOrEmpty(chatCompletionObject.completion))
-                        {
-                            return chatCompletionObject.completion;
-                        }
-                        else
-                        {
-                            log.LogError("Chat completion object is null or empty.");
-                        }
-                    }
-                    catch (JsonException ex)
-                    {
-                        log.LogError(ex, "Failed to deserialize chat result.");
-                    }
-                }
-                else
-                {
-                    log.LogError("Chat result is not a valid JSON.");
-                }
+                var response = await _httpClient.PostAsJsonAsync($"{_apiBaseUrl}/api/sessions/{sessionId}/chat", request);
+                response.EnsureSuccessStatusCode();
+                
+                var result = await response.Content.ReadFromJsonAsync<ChatResponse>();
+                return result?.Response;
             }
             catch (Exception ex)
             {
-                log.LogError(ex, "An error occurred while processing the chat.");
-                throw;
+                _logger.LogError(ex, "Error processing chat for session {SessionId}", sessionId);
+                return null;
             }
-
-            return null;
         }
+    }
+
+    public class ChatResponse
+    {
+        public string Response { get; set; }
     }
 }

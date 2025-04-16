@@ -4,17 +4,19 @@ using Azure.Messaging.EventGrid;
 using Azure.Messaging.EventGrid.SystemEvents;
 using System.Text.Json;
 using Whats.Webhook.Models;
-using Microsoft.Extensions.Logging;
 using Whats.Webhook.Services;
 
 namespace Whats.Webhook.Controllers
 {
     [Route("webhook")]
-    public class WebhookController : Controller
+    public class WebhookController(
+        ISessionService sessionService,
+        INotificationService notificationService,
+        ILogger<WebhookController> logger) : Controller
     {
-        private readonly ISessionService _sessionService;
-        private readonly INotificationService _notificationService;
-        private readonly ILogger<WebhookController> _logger;
+        private readonly ISessionService _sessionService = sessionService ?? throw new ArgumentNullException(nameof(sessionService));
+        private readonly INotificationService _notificationService = notificationService ?? throw new ArgumentNullException(nameof(notificationService));
+        private readonly ILogger<WebhookController> _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         private readonly JsonSerializerOptions _jsonOptions = new() { PropertyNameCaseInsensitive = true };
 
         private bool EventTypeSubscriptionValidation
@@ -25,24 +27,14 @@ namespace Whats.Webhook.Controllers
             => HttpContext.Request.Headers["aeg-event-type"].FirstOrDefault() ==
                "Notification";
 
-        public WebhookController(
-            ISessionService sessionService,
-            INotificationService notificationService,
-            ILogger<WebhookController> logger)
-        {
-            _sessionService = sessionService ?? throw new ArgumentNullException(nameof(sessionService));
-            _notificationService = notificationService ?? throw new ArgumentNullException(nameof(notificationService));
-            _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-        }
-
         [HttpOptions]
         public IActionResult Options()
         {
             var webhookRequestOrigin = HttpContext.Request.Headers["WebHook-Request-Origin"].FirstOrDefault();
             
             // Set CORS headers for webhook validation
-            HttpContext.Response.Headers.Add("WebHook-Allowed-Rate", "*");
-            HttpContext.Response.Headers.Add("WebHook-Allowed-Origin", webhookRequestOrigin);
+            HttpContext.Response.Headers["WebHook-Allowed-Rate"] = "*";
+            HttpContext.Response.Headers["WebHook-Allowed-Origin"] = webhookRequestOrigin ?? string.Empty;
 
             return Ok();
         }
@@ -80,33 +72,56 @@ namespace Whats.Webhook.Controllers
 
         private async Task<JsonResult> HandleValidation(string jsonContent)
         {
-            var eventGridEvent = JsonSerializer.Deserialize<EventGridEvent[]>(jsonContent, _jsonOptions).First();
+            var eventGridEvents = JsonSerializer.Deserialize<EventGridEvent[]>(jsonContent, _jsonOptions);
+            if (eventGridEvents == null || !eventGridEvents.Any())
+            {
+                _logger.LogError("Invalid event grid data received");
+                return new JsonResult(new { error = "Invalid event data" });
+            }
+
+            var eventGridEvent = eventGridEvents.First();
             var eventData = JsonSerializer.Deserialize<SubscriptionValidationEventData>(eventGridEvent.Data.ToString(), _jsonOptions);
             
-            _logger.LogInformation("Subscription validation with code: {ValidationCode}", eventData.ValidationCode);
-            
-            var responseData = new SubscriptionValidationResponse
+            if (eventData != null)
             {
-                ValidationResponse = eventData.ValidationCode
-            };
+                _logger.LogInformation("Subscription validation with code: {ValidationCode}", eventData.ValidationCode);
+                
+                var responseData = new SubscriptionValidationResponse
+                {
+                    ValidationResponse = eventData.ValidationCode
+                };
+                
+                // Adding an await to justify the async method
+                await Task.CompletedTask;
+                
+                return new JsonResult(responseData);
+            }
             
-            return new JsonResult(responseData);
+            _logger.LogError("Invalid validation data received");
+            return new JsonResult(new { error = "Invalid validation data" });
         }
 
         private async Task<IActionResult> HandleGridEvents(string jsonContent)
         {
             var eventGridEvents = JsonSerializer.Deserialize<EventGridEvent[]>(jsonContent, _jsonOptions);
             
-            foreach (var eventGridEvent in eventGridEvents)
+            if (eventGridEvents != null)
             {
-                if (eventGridEvent.EventType.Equals("microsoft.communication.advancedmessagereceived", StringComparison.OrdinalIgnoreCase))
+                foreach (var eventGridEvent in eventGridEvents)
                 {
-                    await ProcessWhatsAppMessage(eventGridEvent);
+                    if (eventGridEvent.EventType.Equals("microsoft.communication.advancedmessagereceived", StringComparison.OrdinalIgnoreCase))
+                    {
+                        await ProcessWhatsAppMessage(eventGridEvent);
+                    }
+                    else
+                    {
+                        _logger.LogInformation("Skipping non-WhatsApp event type: {EventType}", eventGridEvent.EventType);
+                    }
                 }
-                else
-                {
-                    _logger.LogInformation("Skipping non-WhatsApp event type: {EventType}", eventGridEvent.EventType);
-                }
+            }
+            else
+            {
+                _logger.LogWarning("No event grid events found in the payload");
             }
 
             return Ok();
@@ -126,12 +141,12 @@ namespace Whats.Webhook.Controllers
 
                 // Log the incoming message
                 _logger.LogInformation("Received message from {Sender}: {Content}", 
-                    messageData.from, messageData.content);
+                    messageData.from, messageData.content ?? string.Empty);
                 
                 // Keep message history for UI display
                 Messages.MessagesListStatic.Add(new Message
                 {
-                    Text = $"Customer({messageData.from}): \"{messageData.content}\""
+                    Text = $"Customer({messageData.from}): \"{messageData.content ?? string.Empty}\""
                 });
 
                 var sessionId = GenerateSessionId(messageData.from);
@@ -145,7 +160,7 @@ namespace Whats.Webhook.Controllers
                 }
 
                 // Process the message and get a response from backend service
-                var response = await _sessionService.ProcessChatAsync(sessionId, messageData.content);
+                var response = await _sessionService.ProcessChatAsync(sessionId, messageData.content ?? string.Empty);
                 
                 if (!string.IsNullOrEmpty(response))
                 {
@@ -175,7 +190,7 @@ namespace Whats.Webhook.Controllers
         
         private static string GenerateSessionId(string phoneNumber)
         {
-            return phoneNumber?.Trim();
+            return phoneNumber?.Trim() ?? string.Empty;
         }
     }
 }

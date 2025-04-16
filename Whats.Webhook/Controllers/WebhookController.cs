@@ -10,8 +10,7 @@ using Whats.Webhook.Services;
 namespace Whats.Webhook.Controllers
 {
     [Route("webhook")]
-    [ApiController]
-    public class WebhookController : ControllerBase
+    public class WebhookController : Controller
     {
         private readonly ISessionService _sessionService;
         private readonly INotificationService _notificationService;
